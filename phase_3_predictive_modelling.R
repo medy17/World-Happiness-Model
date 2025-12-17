@@ -1,116 +1,85 @@
-# --- Phase 3: Predictive Modelling and Evaluation ---
+# --- Phase 3: Final Model with RAW DATA & Black Swan Test ---
 
 # 1. Load Required Libraries
 library(tidyverse)
-library(broom)   # For tidying model output
-library(Metrics) # For easily calculating RMSE and MAE
+library(broom)
+library(Metrics)
+library(patchwork)
 
-# 2. Load the clean training and testing data from Phase 1
-train_data <- read_csv(
-  "processed_data/train_set.csv",
-  show_col_types = FALSE
-)
-test_data <- read_csv(
-  "processed_data/test_set.csv",
-  show_col_types = FALSE
-)
+# 2. Load the NEW raw master dataset
+raw_master_data <- read_csv("processed_data/raw_master_dataset.csv", show_col_types = FALSE)
 
-
-# 3. Feature Scaling
-# To interpret our final model's coefficients fairly, we need to scale the
-# predictor variables. We will standardise them (mean = 0, sd = 1).
-
-# Learn the scaling parameters (mean and sd) from the training
-# data ONLY to prevent data leakage from the test set.
-scaling_params <- train_data %>%
-  summarise(
-    across(
-      c(
-        gdp_per_capita, social_support, health,
-        freedom, trust, generosity
-      ),
-      list(mean = mean, sd = sd)
-    )
-  )
-
-# Now, apply these learned parameters to both the training and testing sets.
-train_scaled <- train_data %>%
+# 3. Create the complete lagged dataset (3-year lag with validation)
+lag_data <- raw_master_data %>%
+  arrange(country, year) %>%
+  group_by(country) %>%
   mutate(
-    gdp_per_capita = (gdp_per_capita - scaling_params$gdp_per_capita_mean) /
-      scaling_params$gdp_per_capita_sd,
-    social_support = (social_support - scaling_params$social_support_mean) /
-      scaling_params$social_support_sd,
-    health = (health - scaling_params$health_mean) / scaling_params$health_sd,
-    freedom = (freedom - scaling_params$freedom_mean) / scaling_params$freedom_sd,
-    trust = (trust - scaling_params$trust_mean) / scaling_params$trust_sd,
-    generosity = (generosity - scaling_params$generosity_mean) /
-      scaling_params$generosity_sd
-  )
+    happiness_score_future = lead(happiness_score, n = 3),
+    target_year = year + 3,
+    year_diff = lead(year, n = 3) - year
+  ) %>%
+  filter(year_diff == 3) %>%
+  select(-year_diff) %>%
+  ungroup() %>%
+  drop_na()
 
-test_scaled <- test_data %>%
-  mutate(
-    gdp_per_capita = (gdp_per_capita - scaling_params$gdp_per_capita_mean) /
-      scaling_params$gdp_per_capita_sd,
-    social_support = (social_support - scaling_params$social_support_mean) /
-      scaling_params$social_support_sd,
-    health = (health - scaling_params$health_mean) / scaling_params$health_sd,
-    freedom = (freedom - scaling_params$freedom_mean) / scaling_params$freedom_sd,
-    trust = (trust - scaling_params$trust_mean) / scaling_params$trust_sd,
-    generosity = (generosity - scaling_params$generosity_mean) /
-      scaling_params$generosity_sd
-  )
+# 4. Split data into the three distinct eras
+training_data <- lag_data %>% filter(target_year <= 2020)
+crisis_data <- lag_data %>% filter(target_year %in% c(2021, 2022))
+recovery_data <- lag_data %>% filter(target_year >= 2023)
 
-
-# 4. Train the Final Multiple Linear Regression Model
-# We use the scaled training data. The '.' means "use all other columns as predictors".
-final_model <- lm(
-  happiness_score_next_year ~ .,
-  data = select(train_scaled, -year, -country)
+# 5. Train ONE model on the Training era data, now using RAW predictors
+final_model_raw <- lm(
+  # UPDATED FORMULA with new variable names
+  happiness_score_future ~ raw_gdp + raw_health + social_support + freedom + trust + generosity,
+  data = training_data
 )
 
-# 5. Interpret the Final Model's Coefficients
-cat("--- Final Model Coefficients (from scaled data) ---\n\n")
-# Using broom::tidy() gives a nice, clean data frame of the results
-model_summary <- tidy(final_model)
-print(model_summary)
+# 6. Define the evaluation function
+evaluate_model <- function(model, data, era_name) {
+  predictions_with_intervals <- predict(model, newdata = data, interval = "prediction")
+  eval_data <- data %>%
+    bind_cols(as_tibble(predictions_with_intervals) %>% rename(predicted_score = fit, pred_lower = lwr, pred_upper = upr))
 
+  metrics <- tibble(
+    Era = era_name,
+    R_Squared = cor(eval_data$happiness_score_future, eval_data$predicted_score)^2,
+    RMSE = rmse(eval_data$happiness_score_future, eval_data$predicted_score),
+    MAE = mae(eval_data$happiness_score_future, eval_data$predicted_score)
+  )
+  return(list(metrics = metrics, data_with_preds = eval_data))
+}
 
-# 6. Make Predictions on the Unseen Test Set
-predictions <- predict(final_model, newdata = test_scaled)
+# 7. Evaluate the single model across all three eras
+training_eval <- evaluate_model(final_model_raw, training_data, "Training (<=2020 Targets)")
+crisis_eval <- evaluate_model(final_model_raw, crisis_data, "Crisis (2021-2022 Targets)")
+recovery_eval <- evaluate_model(final_model_raw, recovery_data, "Recovery (2023+ Targets)")
 
-# Combine predictions with actual values for evaluation
-evaluation_df <- test_data %>%
-  mutate(predicted_score = predictions)
+# 8. Present the final results
+comparison_table <- bind_rows(training_eval$metrics, crisis_eval$metrics, recovery_eval$metrics)
+cat("\n--- Quantitative Performance Across Eras (Using RAW Data) ---\n")
+print(comparison_table)
 
+plot_data <- bind_rows(
+  training_eval$data_with_preds %>% mutate(Era = "A) Training Era"),
+  crisis_eval$data_with_preds %>% mutate(Era = "B) Crisis Era"),
+  recovery_eval$data_with_preds %>% mutate(Era = "C) Recovery Era")
+)
 
-# 7. Evaluate Model Performance
-cat("\n--- Model Performance on the 2018 -> 2019 Test Set ---\n\n")
-
-rmse_val <- rmse(evaluation_df$happiness_score_next_year, evaluation_df$predicted_score)
-mae_val <- mae(evaluation_df$happiness_score_next_year, evaluation_df$predicted_score)
-
-cat("Root Mean Squared Error (RMSE):", round(rmse_val, 4), "\n")
-cat("Mean Absolute Error (MAE):     ", round(mae_val, 4), "\n")
-
-
-# 8. Create Visualization for the Final Report
-performance_plot <- ggplot(
-  evaluation_df,
-  aes(x = happiness_score_next_year, y = predicted_score)
-) +
-  geom_point(alpha = 0.7, color = "darkgreen") +
-  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+final_plot <- ggplot(plot_data, aes(x = happiness_score_future, y = predicted_score)) +
+  geom_ribbon(aes(ymin = pred_lower, ymax = pred_upper), fill = "grey50", alpha = 0.3) +
+  geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed", linewidth = 1) +
+  geom_point(aes(color = factor(target_year)), alpha = 0.8) +
+  facet_wrap(~Era) +
+  coord_fixed(xlim = c(2, 8.5), ylim = c(2, 8.5)) +
   labs(
-    title = "Model Performance: Actual vs. Predicted Happiness Score",
-    subtitle = "Predictions for 2019 based on 2018 data",
-    x = "Actual Happiness Score (2019)",
-    y = "Predicted Happiness Score (2019)"
+    title = "Model Performance with Raw Data (GDP & Health)",
+    subtitle = "Prediction uncertainty (grey ribbon) increases in Crisis and Recovery eras",
+    x = "Actual Happiness Score", y = "Predicted Happiness Score", color = "Target Year"
   ) +
-  coord_fixed(xlim = c(2.5, 8), ylim = c(2.5, 8)) +
-  theme_minimal()
+  theme_minimal() + theme(legend.position = "bottom")
 
-# Display the plot
-print(performance_plot)
+print(final_plot)
+ggsave("final_report_visuals/raw_data_multi_era_plot.png", final_plot, width = 12, height = 5)
 
-# Save the plot for the report
-ggsave("final_report_visuals/performance_plot.png", performance_plot, width = 8, height = 6)
+cat("\nAnalysis with RAW DATA is complete. The definitive plot has been saved.\n")

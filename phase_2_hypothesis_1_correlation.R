@@ -1,48 +1,54 @@
-# --- Phase 2: Hypothesis 1 - Correlation Test ---
+# --- Phase 2: Hypothesis 1 - Correlation Test (FINAL - Using RAW Data) ---
 
 # 1. Load Required Libraries
 library(tidyverse)
-library(ggpubr) # For adding correlation info to plots
+library(ggpubr)
 
-# 2. Load the clean training data from Phase 1
-# This script assumes it's being run from the project's root directory
-train_data <- read_csv(
-  "processed_data/train_set.csv",
-  show_col_types = FALSE
-)
+# 2. UPDATED: Load the new raw master dataset
+raw_data <- read_csv("processed_data/raw_master_dataset.csv", show_col_types = FALSE)
 
-# 3. Visual Assumption Check: Create a scatter plot
+# 3. Create a 3-YEAR LAG dataset from the raw data
+lag_data <- raw_data %>%
+  arrange(country, year) %>%
+  group_by(country) %>%
+  mutate(
+    happiness_score_future = lead(happiness_score, n = 3),
+    year_diff = lead(year, n = 3) - year
+  ) %>%
+  filter(year_diff == 3) %>%
+  select(-year_diff) %>%
+  ungroup() %>%
+  drop_na()
+
+cat("Total observations with a valid 3-year lag:", nrow(lag_data), "observations\n")
+
+# 4. Visual Check & Correlation Test using RAW GDP
 correlation_plot <- ggplot(
-  train_data,
-  aes(x = gdp_per_capita, y = happiness_score_next_year)
+  lag_data,
+  # UPDATED: Use raw_gdp in the aesthetic
+  aes(x = raw_gdp, y = happiness_score_future)
 ) +
-  geom_point(alpha = 0.6, color = "green") +
-  geom_smooth(method = "lm", se = FALSE, color = "red") +
-  stat_cor(
-    method = "pearson",
-    label.x = 0.2,
-    label.y = 7.8
-  ) + # Add correlation coefficient to plot
+  geom_point(alpha = 0.6, color = "purple") +
+  # Note: GDP is on a large scale, so we'll log-transform for a better linear fit visually
+  scale_x_log10(labels = scales::dollar) +
+  geom_smooth(method = "lm", se = FALSE, color = "orange") +
+  stat_cor(method = "pearson", label.y = 8.0) +
   labs(
-    title = "GDP per Capita (Year t) vs. Happiness Score (Year t+1)",
-    subtitle = "Data from 2015-2017 training set",
-    x = "GDP per Capita Contribution",
-    y = "Next Year's Happiness Score"
-  ) +
-  theme_minimal()
+    title = "Raw GDP per Capita (Year t) vs. Happiness Score (Year t+3)",
+    # UPDATED: Label reflects raw data
+    x = "Raw GDP per Capita (Log Scale)",
+    y = "Future Happiness Score (3 years later)"
+  ) + theme_minimal()
 
-# Display the plot
 print(correlation_plot)
 
-# 4. Perform the Pearson Correlation Test
-# We test the alternative hypothesis that the true correlation is positive ("greater")
+# Perform the Pearson Correlation Test on raw data
 correlation_test_result <- cor.test(
-  ~ gdp_per_capita + happiness_score_next_year,
-  data = train_data,
-  alternative = "greater",
-  conf.level = 0.95
+  # UPDATED: Use raw_gdp in the formula
+  ~ raw_gdp + happiness_score_future,
+  data = lag_data,
+  alternative = "greater", conf.level = 0.95
 )
 
-# 5. Present the results clearly
-cat("--- Pearson's Correlation Test Results ---\n\n")
+cat("\n--- Pearson's Correlation Test (RAW Data, 3-Year Lag) ---\n\n")
 print(correlation_test_result)
